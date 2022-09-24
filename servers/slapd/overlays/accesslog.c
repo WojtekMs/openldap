@@ -987,21 +987,9 @@ log_cf_gen(ConfigArgs *c)
 			ch_free( c->value_dn.bv_val );
 			break;
 		case LOG_OPS:
-			if ( verbs_to_mask( c->argc, c->argv, logops, &tmask ) ) {
-				rc = 1;
-				break;
-			}
-			/* Tolerate overlaps in slapd.conf */
-			if ( c->op != SLAP_CONFIG_ADD && li->li_ops & tmask ) {
-				snprintf( c->cr_msg, sizeof( c->cr_msg ),
-					"%s value overlaps with existing configuration",
-					c->argv[0] );
-				Debug( LDAP_DEBUG_CONFIG|LDAP_DEBUG_NONE,
-					"%s: %s\n", c->log, c->cr_msg );
-				rc = 1;
-				break;
-			}
-			li->li_ops |= tmask;
+			rc = verbs_to_mask( c->argc, c->argv, logops, &tmask );
+			if ( rc == 0 )
+				li->li_ops |= tmask;
 			break;
 		case LOG_PURGE:
 			li->li_age = log_age_parse( c->argv[1] );
@@ -1042,16 +1030,6 @@ log_cf_gen(ConfigArgs *c)
 			AttributeDescription *ad;
 			const char *text;
 			log_attr **lp = &li->li_oldattrs;
-
-			if ( c->op != SLAP_CONFIG_ADD && c->argc > 2 ) {
-				/* We wouldn't know how to delete these values later */
-				snprintf( c->cr_msg, sizeof( c->cr_msg ),
-					"Please insert multiple names as separate %s values",
-					c->argv[0] );
-				Debug( LDAP_DEBUG_CONFIG|LDAP_DEBUG_NONE,
-					"%s: %s\n", c->log, c->cr_msg );
-				return LDAP_INVALID_SYNTAX;
-			}
 
 			for ( i=0; *lp && ( c->valx < 0 || i < c->valx ); i++ )
 				lp = &(*lp)->next;
@@ -1994,110 +1972,55 @@ accesslog_response(Operation *op, SlapReply *rs)
 	if ( e == op2.ora_e ) entry_free( e );
 	e = NULL;
 
-	if ( ( lo->mask & LOG_OP_WRITES ) ) {
-		/*
-		 * Catch a real contextCSN update coming from a plain refresh, do the
-		 * same to our DB.
-		 *
-		 * TODO: we should still be usable as sessionlog source, but maybe not
-		 * quite for deltasync anymore, we can't really make that distinction
-		 * yet.
-		 */
-		if ( SLAPD_SYNC_IS_SYNCCONN( op->o_connid ) &&
-			op->o_dont_replicate == 0 &&
-			op->o_tag == LDAP_REQ_MODIFY &&
-			op->orm_modlist &&
-			op->orm_modlist->sml_op == LDAP_MOD_REPLACE &&
-			op->orm_modlist->sml_desc == slap_schema.si_ad_contextCSN ) {
-			Modifications mod;
+	if ( ( lo->mask & LOG_OP_WRITES ) && !BER_BVISEMPTY( &op->o_csn ) ) {
+		Modifications mod;
+		int i, sid = slap_parse_csn_sid( &op->o_csn );
 
-			/*
-			 * ITS#9580 FIXME: This will only work if we log successful writes
-			 * and nothing else, otherwise we're reverting some CSNs (at least
-			 * our own) in the contextCSN to an older value.
-			 *
-			 * Right now we depend on syncprov's checkpoint to clean up after.
-			 */
-			mod = *op->orm_modlist;
-			mod.sml_next = NULL;
+		for ( i=0; i < li->li_numcsns; i++ ) {
+			if ( sid <= li->li_sids[i] ) break;
+		}
+		if ( i >= li->li_numcsns || sid != li->li_sids[i] ) {
+			/* SID not in minCSN set, add */
+			struct berval bv[2];
 
-			/* Update relevant parts of op, reuse the rest */
+			Debug( LDAP_DEBUG_TRACE, "accesslog_response: "
+					"adding minCSN %s\n",
+					op->o_csn.bv_val );
+			slap_insert_csn_sids( (struct sync_cookie *)&li->li_mincsn, i,
+					sid, &op->o_csn );
+
 			op2.o_tag = LDAP_REQ_MODIFY;
-			op2.o_csn = op->o_csn;
 			op2.o_req_dn = li->li_db->be_suffix[0];
 			op2.o_req_ndn = li->li_db->be_nsuffix[0];
+
+			bv[0] = op->o_csn;
+			BER_BVZERO( &bv[1] );
+
+			mod.sml_numvals = 1;
+			mod.sml_values = bv;
+			mod.sml_nvalues = bv;
+			mod.sml_desc = ad_minCSN;
+			mod.sml_op = LDAP_MOD_ADD;
+			mod.sml_flags = SLAP_MOD_INTERNAL;
+			mod.sml_next = NULL;
+
 			op2.orm_modlist = &mod;
 			op2.orm_no_opattrs = 1;
-			op2.o_dont_replicate = 0;
 
+			Debug( LDAP_DEBUG_SYNC, "accesslog_response: "
+					"adding a new csn=%s into minCSN\n",
+					bv[0].bv_val );
 			rs_reinit( &rs2, REP_RESULT );
 			op2.o_bd->be_modify( &op2, &rs2 );
-
 			if ( rs2.sr_err != LDAP_SUCCESS ) {
-				Debug( LDAP_DEBUG_SYNC, "%s accesslog_response: "
-						"got result 0x%x trying to reset contextCSN\n",
-						op->o_log_prefix, rs2.sr_err );
-			}
-
-			/* Replace in-memory mincsn */
-			if ( li->li_mincsn )
-				ber_bvarray_free( li->li_mincsn );
-			if ( li->li_sids )
-				ch_free( li->li_sids );
-			ber_bvarray_dup_x( &li->li_mincsn, op->orm_modlist->sml_values, NULL );
-			li->li_numcsns = op->orm_modlist->sml_numvals;
-			li->li_sids = slap_parse_csn_sids( li->li_mincsn, li->li_numcsns, NULL );
-			slap_sort_csn_sids( li->li_mincsn, li->li_sids, li->li_numcsns, NULL );
-		} else if ( !BER_BVISEMPTY( &op->o_csn ) ) {
-			Modifications mod;
-			int i, sid = slap_parse_csn_sid( &op->o_csn );
-
-			for ( i=0; i < li->li_numcsns; i++ ) {
-				if ( sid <= li->li_sids[i] ) break;
-			}
-			if ( i >= li->li_numcsns || sid != li->li_sids[i] ) {
-				/* SID not in minCSN set, add */
-				struct berval bv[2];
-
-				Debug( LDAP_DEBUG_TRACE, "accesslog_response: "
-						"adding minCSN %s\n",
-						op->o_csn.bv_val );
-				slap_insert_csn_sids( (struct sync_cookie *)&li->li_mincsn, i,
-						sid, &op->o_csn );
-
-				op2.o_tag = LDAP_REQ_MODIFY;
-				op2.o_req_dn = li->li_db->be_suffix[0];
-				op2.o_req_ndn = li->li_db->be_nsuffix[0];
-
-				bv[0] = op->o_csn;
-				BER_BVZERO( &bv[1] );
-
-				mod.sml_numvals = 1;
-				mod.sml_values = bv;
-				mod.sml_nvalues = bv;
-				mod.sml_desc = ad_minCSN;
-				mod.sml_op = LDAP_MOD_ADD;
-				mod.sml_flags = SLAP_MOD_INTERNAL;
-				mod.sml_next = NULL;
-
-				op2.orm_modlist = &mod;
-				op2.orm_no_opattrs = 1;
-
 				Debug( LDAP_DEBUG_SYNC, "accesslog_response: "
-						"adding a new csn=%s into minCSN\n",
-						bv[0].bv_val );
-				rs_reinit( &rs2, REP_RESULT );
-				op2.o_bd->be_modify( &op2, &rs2 );
-				if ( rs2.sr_err != LDAP_SUCCESS ) {
-					Debug( LDAP_DEBUG_SYNC, "accesslog_response: "
-							"got result 0x%x adding minCSN %s\n",
-							rs2.sr_err, op->o_csn.bv_val );
-				}
-			} else if ( ber_bvcmp( &op->o_csn, &li->li_mincsn[i] ) < 0 ) {
-				Debug( LDAP_DEBUG_ANY, "accesslog_response: "
-						"csn=%s older than existing minCSN csn=%s for this sid\n",
-						op->o_csn.bv_val, li->li_mincsn[i].bv_val );
+						"got result 0x%x adding minCSN %s\n",
+						rs2.sr_err, op->o_csn.bv_val );
 			}
+		} else if ( ber_bvcmp( &op->o_csn, &li->li_mincsn[i] ) < 0 ) {
+			Debug( LDAP_DEBUG_ANY, "accesslog_response: "
+					"csn=%s older than existing minCSN csn=%s for this sid\n",
+					op->o_csn.bv_val, li->li_mincsn[i].bv_val );
 		}
 	}
 
@@ -2649,7 +2572,7 @@ accesslog_db_open(
 	}
 
 	ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
-	ldap_pvt_runqueue_insert( &slapd_rq, 0, accesslog_db_root, on,
+	ldap_pvt_runqueue_insert( &slapd_rq, 3600, accesslog_db_root, on,
 		"accesslog_db_root", li->li_db->be_suffix[0].bv_val );
 	ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
 

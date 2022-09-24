@@ -906,7 +906,6 @@ LDAP_SLAPD_V (SOCKET *) slapd_ws_sockets;
 
 LDAP_SLAPD_V (ldap_pvt_thread_mutex_t) slapd_init_mutex;
 LDAP_SLAPD_V (ldap_pvt_thread_cond_t) slapd_init_cond;
-LDAP_SLAPD_V (int) slapd_ready;
 
 /*
  * dn.c
@@ -1787,6 +1786,7 @@ LDAP_SLAPD_F( int ) structural_class(
 LDAP_SLAPD_F( int ) entry_schema_check(
 	Operation *op,
 	Entry *e,
+	Attribute *attrs,
 	int manage,
 	int add,
 	Attribute **socp,

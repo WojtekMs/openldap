@@ -64,6 +64,7 @@ int slap_inet4or6 = AF_INET;
 
 /* globals */
 time_t starttime;
+struct runqueue_s slapd_rq;
 
 #ifdef LDAP_TCP_BUFFER
 int slapd_tcp_rmem;
@@ -778,9 +779,6 @@ lloadd_daemon_destroy( void )
                 event_base_free( lload_daemon[i].base );
             }
         }
-
-        event_free( lload_stats_event );
-        event_free( lload_timeout_event );
 
         event_base_free( daemon_base );
         daemon_base = NULL;

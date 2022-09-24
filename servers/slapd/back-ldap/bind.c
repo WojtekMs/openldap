@@ -3178,6 +3178,12 @@ ldap_back_conn_prune( ldapinfo_t *li )
 		li->li_conn_expire_task->interval.tv_sec = next_timeout - now;
 		ldap_pvt_runqueue_resched( &slapd_rq, li->li_conn_expire_task, 0 );
 
+		/*
+		 * The thread that handles runqueue might have already processed all tasks
+		 * before we insertered new task or rescheduled the existing task with new
+		 * timeout period. Wake it up to ensure that the task will be picked up.
+		 */
+		slap_wake_listener();
 		Debug( LDAP_DEBUG_TRACE,
 			"ldap_back_conn_prune: scheduled connection expiry timer to %ld sec\n",
 			li->li_conn_expire_task->interval.tv_sec );
@@ -3205,24 +3211,18 @@ ldap_back_schedule_conn_expiry( ldapinfo_t *li, ldapconn_t *lc ) {
 	 * timeout of this connection.
 	 *
 	 * If the task is already running, this connection cannot be next one
-	 * to expire (all connections share the same timeout) and therefore timeout
-	 * does not need to be re-calculated.
+	 * to expire and therefore timeout does not need to be re-calculated.
 	 */
 	ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
 	if ( li->li_conn_expire_task == NULL ) {
-		li->li_conn_expire_task = ldap_pvt_runqueue_insert( &slapd_rq, 0,
+		li->li_conn_expire_task = ldap_pvt_runqueue_insert( &slapd_rq,
+			ldap_back_conn_expire_time( li, lc ) - slap_get_time(),
 			ldap_back_conn_expire_fn, li, "ldap_back_conn_expire_fn",
 			"ldap_back_conn_expire_timer" );
-
-		li->li_conn_expire_task->interval.tv_sec =
-			ldap_back_conn_expire_time( li, lc ) - slap_get_time();
-		ldap_pvt_runqueue_resched( &slapd_rq, li->li_conn_expire_task, 0 );
+		slap_wake_listener();
 		Debug( LDAP_DEBUG_TRACE,
 			"ldap_back_conn_prune: scheduled connection expiry timer to %ld sec\n",
 			li->li_conn_expire_task->interval.tv_sec );
-
-		/* Make this a one-shot task */
-		li->li_conn_expire_task->interval.tv_sec = 0;
 	}
 	ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
 

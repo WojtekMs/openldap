@@ -2256,6 +2256,7 @@ deleted:
 			}
 			si->si_retrynum[i] = RETRYNUM_TAIL;
 		}
+		slap_wake_listener();
 		rc = 0;
 	} else {
 		for ( i = 0; si->si_retrynum && si->si_retrynum[i] <= 0; i++ ) {
@@ -2276,6 +2277,7 @@ deleted:
 			fail = si->si_retrynum[i];
 			rtask->interval.tv_sec = si->si_retryinterval[i];
 			ldap_pvt_runqueue_resched( &slapd_rq, rtask, 0 );
+			slap_wake_listener();
 		}
 	}
 
@@ -2944,7 +2946,6 @@ syncrepl_op_modify( Operation *op, SlapReply *rs )
 		an[0].an_name = ad_reqMod->ad_cname;
 		op2.ors_attrs = an;
 		op2.ors_attrsonly = 0;
-		op2.o_dont_replicate = 1;
 
 		bv = mod->sml_nvalues[0];
 
@@ -4194,8 +4195,6 @@ syncrepl_entry(
 	op->ors_attrs = slap_anlist_all_attributes;
 	op->ors_attrsonly = 0;
 
-	op->o_dont_replicate = 1;
-
 	/* set callback function */
 	op->o_callback = &cb;
 	cb.sc_response = dn_callback;
@@ -4210,7 +4209,6 @@ syncrepl_entry(
 			"syncrepl_entry: %s be_search (%d)\n", 
 			si->si_ridtxt, rc );
 
-	op->o_dont_replicate = 0;
 	if ( !BER_BVISNULL( &op->ors_filterstr ) ) {
 		slap_sl_free( op->ors_filterstr.bv_val, op->o_tmpmemctx );
 	}
@@ -4346,7 +4344,6 @@ retry_add:;
 					op2.ors_limit = NULL;
 					op2.ors_slimit = 1;
 					op2.ors_tlimit = SLAP_NO_LIMIT;
-					op2.o_dont_replicate = 1;
 					BER_BVZERO( &op2.o_csn );
 
 					f.f_choice = LDAP_FILTER_PRESENT;
@@ -4743,7 +4740,6 @@ syncrepl_del_nonpresent(
 	op->o_time = slap_get_time();
 	op->ors_tlimit = SLAP_NO_LIMIT;
 
-	op->o_dont_replicate = 1;
 
 	if ( uuids ) {
 		Filter uf;
@@ -4836,7 +4832,6 @@ syncrepl_del_nonpresent(
 	}
 
 	op->o_nocaching = 0;
-	op->o_dont_replicate = 0;
 
 	if ( !LDAP_LIST_EMPTY( &si->si_nonpresentlist ) ) {
 
@@ -4867,9 +4862,6 @@ syncrepl_del_nonpresent(
 			cb.sc_private = si;
 			op->o_req_dn = *np_prev->npe_name;
 			op->o_req_ndn = *np_prev->npe_nname;
-
-			/* avoid timestamp collisions */
-			slap_op_time( &op->o_time, &op->o_tincr );
 			rc = op->o_bd->be_delete( op, &rs_delete );
 			Debug( LDAP_DEBUG_SYNC,
 				"syncrepl_del_nonpresent: %s be_delete %s (%d)\n", 
@@ -4910,8 +4902,6 @@ syncrepl_del_nonpresent(
 				op->o_tag = LDAP_REQ_MODIFY;
 				op->orm_modlist = &mod1;
 
-				/* avoid timestamp collisions */
-				slap_op_time( &op->o_time, &op->o_tincr );
 				rc = op->o_bd->be_modify( op, &rs_modify );
 				if ( mod3.sml_next ) slap_mods_free( mod3.sml_next, 1 );
 			}
@@ -4919,7 +4909,6 @@ syncrepl_del_nonpresent(
 			while ( rs_delete.sr_err == LDAP_SUCCESS &&
 					op->o_delete_glue_parent ) {
 				op->o_delete_glue_parent = 0;
-				op->o_dont_replicate = 1;
 				if ( !be_issuffix( be, &op->o_req_ndn ) ) {
 					slap_callback cb = { NULL };
 					cb.sc_response = syncrepl_null_callback;
@@ -4936,7 +4925,6 @@ syncrepl_del_nonpresent(
 			}
 
 			op->o_delete_glue_parent = 0;
-			op->o_dont_replicate = 0;
 
 			ber_bvfree( np_prev->npe_name );
 			ber_bvfree( np_prev->npe_nname );
@@ -5106,13 +5094,7 @@ syncrepl_add_glue(
 	Backend *be = op->o_bd;
 	SlapReply	rs_add = {REP_RESULT};
 
-	/*
-	 * Glue entries are local and should not be sent out or logged by accesslog
-	 * except as part of a delete
-	 */
-	op->o_dont_replicate = 1;
 	rc = syncrepl_add_glue_ancestors( op, e );
-	op->o_dont_replicate = 0;
 	switch ( rc ) {
 	case LDAP_SUCCESS:
 	case LDAP_ALREADY_EXISTS:
@@ -6044,8 +6026,6 @@ syncinfo_free( syncinfo_t *sie, int free_all )
 		if ( !BER_BVISEMPTY( &sie->si_monitor_ndn )) {
 			syncrepl_monitor_del( sie );
 		}
-		ch_free( sie->si_lastCookieSent.bv_val );
-		ch_free( sie->si_lastCookieRcvd.bv_val );
 
 		if ( sie->si_ld ) {
 			if ( sie->si_conn ) {
@@ -7227,6 +7207,8 @@ syncrepl_monitor_del(
 		monitor_extra_t *mbe = mi->bi_extra;
 		mbe->unregister_entry( &si->si_monitor_ndn );
 	}
+	ch_free( si->si_lastCookieSent.bv_val );
+	ch_free( si->si_lastCookieRcvd.bv_val );
 	ch_free( si->si_monitor_ndn.bv_val );
 	return 0;
 }
@@ -7352,7 +7334,7 @@ add_syncrepl(
 					rc = -1;
 			}
 		} else {
-			/* tools might still want to see this flag (updateref, ...) */
+			/* multiprovider still needs to see this flag in tool mode */
 			rc = config_sync_shadow( c ) ? -1 : 0;
 		}
 		ldap_free_urldesc( lud );
@@ -7667,7 +7649,7 @@ syncrepl_config( ConfigArgs *c )
 			}
 		}
 		if ( !c->be->be_syncinfo ) {
-			SLAP_DBFLAGS( c->be ) &= ~SLAP_DBFLAG_SYNC_SHADOW;
+			SLAP_DBFLAGS( c->be ) &= ~SLAP_DBFLAG_SHADOW_MASK;
 		}
 		return 0;
 	}

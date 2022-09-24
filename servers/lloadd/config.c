@@ -74,6 +74,9 @@ char *slapd_pid_file = NULL;
 char *slapd_args_file = NULL;
 #endif /* !BALANCER_MODULE */
 
+static FILE *logfile;
+static char *logfileName;
+
 static struct timeval timeout_api_tv, timeout_net_tv,
         timeout_write_tv = { 10, 0 };
 
@@ -88,6 +91,8 @@ int lload_conn_max_pdus_per_cycle = LLOAD_CONN_MAX_PDUS_PER_CYCLE_DEFAULT;
 struct timeval *lload_timeout_api = NULL;
 struct timeval *lload_timeout_net = NULL;
 struct timeval *lload_write_timeout = &timeout_write_tv;
+
+static slap_verbmasks tlskey[];
 
 static int fp_getline( FILE *fp, ConfigArgs *c );
 static void fp_getline_init( ConfigArgs *c );
@@ -868,6 +873,8 @@ static ConfigOCs lloadocs[] = {
 };
 #endif /* BALANCER_MODULE */
 
+static int config_syslog;
+
 static int
 config_generic( ConfigArgs *c )
 {
@@ -1319,15 +1326,14 @@ config_bindconf( ConfigArgs *c )
     }
 
     if ( !BER_BVISNULL( &bindconf.sb_authzId ) ) {
-        ber_bvreplace( &lloadd_identity, &bindconf.sb_authzId );
+        ber_dupbv( &lloadd_identity, &bindconf.sb_authzId );
     } else if ( !BER_BVISNULL( &bindconf.sb_authcId ) ) {
-        ber_bvreplace( &lloadd_identity, &bindconf.sb_authcId );
+        ber_dupbv( &lloadd_identity, &bindconf.sb_authcId );
     } else if ( !BER_BVISNULL( &bindconf.sb_binddn ) ) {
         char *ptr;
 
         lloadd_identity.bv_len = STRLENOF("dn:") + bindconf.sb_binddn.bv_len;
-        lloadd_identity.bv_val = ch_realloc(
-                lloadd_identity.bv_val, lloadd_identity.bv_len + 1 );
+        lloadd_identity.bv_val = ch_malloc( lloadd_identity.bv_len + 1 );
 
         ptr = lutil_strcopy( lloadd_identity.bv_val, "dn:" );
         ptr = lutil_strncopy(
@@ -1389,8 +1395,8 @@ static struct {
     { NULL }
 };
 
-void
-lload_restriction_free( struct restriction_entry *restriction )
+static void
+restriction_free( struct restriction_entry *restriction )
 {
     ch_free( restriction->oid.bv_val );
     ch_free( restriction );
@@ -1428,7 +1434,7 @@ config_restrict_oid( ConfigArgs *c )
 
     } else if ( c->op == LDAP_MOD_DELETE ) {
         if ( !c->line ) {
-            ldap_tavl_free( *root, (AVL_FREE)lload_restriction_free );
+            ldap_tavl_free( *root, (AVL_FREE)restriction_free );
             *root = NULL;
             if ( c->type == CFG_RESTRICT_EXOP ) {
                 lload_default_exop_action = LLOAD_OP_NOT_RESTRICTED;
@@ -1553,12 +1559,10 @@ config_tier( ConfigArgs *c )
     if ( CONFIG_ONLINE_ADD( c ) ) {
         assert( tier );
         lload_change.target = tier;
-        ch_free( c->value_string );
         return rc;
     }
 
     tier_impl = lload_tier_find( c->value_string );
-    ch_free( c->value_string );
     if ( !tier_impl ) {
         goto fail;
     }
@@ -1605,7 +1609,7 @@ config_fname( ConfigArgs *c )
 
 #ifdef LDAP_TCP_BUFFER
 static BerVarray tcp_buffer;
-static int tcp_buffer_num;
+int tcp_buffer_num;
 
 #define SLAP_TCP_RMEM ( 0x1U )
 #define SLAP_TCP_WMEM ( 0x2U )

@@ -53,19 +53,9 @@
 typedef	int (check_func)( char *passwd, struct berval *errmsg, Entry *ent, struct berval *arg );
 #define ERRBUFSIZ	256
 
-typedef struct policy_rule {
-	struct berval uri; /* straight from configuration, unparsed below */
-	struct berval base;
-	int scope;
-	Filter *filter;
-	struct berval policy_dn; /* DN of policy entry to select */
-	struct policy_rule *next;
-} policy_rule;
-
 /* Per-instance configuration information */
 typedef struct pp_info {
 	struct berval def_policy;	/* DN of default policy subentry */
-	struct policy_rule *policy_rules;
 	int use_lockout;		/* send AccountLocked result? */
 	int hash_passwords;		/* transparently hash cleartext pwds */
 	int forward_updates;	/* use frontend for policy state updates */
@@ -454,10 +444,9 @@ enum {
 	PPOLICY_USE_LOCKOUT,
 	PPOLICY_DISABLE_WRITE,
 	PPOLICY_CHECK_MODULE,
-	PPOLICY_DEFAULT_RULES,
 };
 
-static ConfigDriver ppolicy_cf_default, ppolicy_cf_rule, ppolicy_cf_checkmod;
+static ConfigDriver ppolicy_cf_default, ppolicy_cf_checkmod;
 
 static ConfigTable ppolicycfg[] = {
 	{ "ppolicy_default", "policyDN", 2, 2, 0,
@@ -512,13 +501,6 @@ static ConfigTable ppolicycfg[] = {
 	  "EQUALITY caseExactIA5Match "
 	  "SYNTAX OMsIA5String "
 	  "SINGLE-VALUE )", NULL, NULL },
-	{ "ppolicy_rules", "URL> <policyDN", 3, 3, 0,
-	  ARG_QUOTE|ARG_MAGIC|PPOLICY_DEFAULT_RULES,
-	  ppolicy_cf_rule,
-	  "( OLcfgOvAt:12.8 NAME 'olcPPolicyRules' "
-	  "DESC 'rules to apply the right ppolicy object for entry' "
-	  "EQUALITY caseIgnoreMatch "
-	  "SYNTAX OMsDirectoryString X-ORDERED 'VALUES' )", NULL, NULL },
 	{ NULL, NULL, 0, 0, 0, ARG_IGNORED }
 };
 
@@ -530,7 +512,7 @@ static ConfigOCs ppolicyocs[] = {
 	  "MAY ( olcPPolicyDefault $ olcPPolicyHashCleartext $ "
 	  "olcPPolicyUseLockout $ olcPPolicyForwardUpdates $ "
 	  "olcPPolicyDisableWrite $ olcPPolicySendNetscapeControls $ "
-	  "olcPPolicyCheckModule $ olcPPolicyRules ) )",
+	  "olcPPolicyCheckModule ) )",
 	  Cft_Overlay, ppolicycfg },
 	{ NULL, 0, NULL }
 };
@@ -583,122 +565,6 @@ ppolicy_cf_default( ConfigArgs *c )
 		abort ();
 	}
 
-	return rc;
-}
-
-static int
-ppolicy_cf_rule( ConfigArgs *c )
-{
-	slap_overinst *on = (slap_overinst *)c->bi;
-	pp_info *pi = (pp_info *)on->on_bi.bi_private;
-	policy_rule *pr = NULL, **prp;
-	LDAPURLDesc *lud = NULL;
-	struct berval bv;
-	int i, rc = ARG_BAD_CONF;
-
-	assert( c->type == PPOLICY_DEFAULT_RULES );
-	Debug( LDAP_DEBUG_TRACE, "==> ppolicy_rules\n" );
-
-	if ( c->op == SLAP_CONFIG_EMIT ) {
-		if ( pi->policy_rules ) {
-			Attribute a = {
-				.a_desc = c->ca_desc->ad,
-				.a_vals = c->rvalue_vals,
-			};
-
-			for ( pr = pi->policy_rules; pr; pr = pr->next ) {
-				bv.bv_len = pr->uri.bv_len + pr->policy_dn.bv_len +
-					STRLENOF("\"\" \"\"");
-				bv.bv_val = ch_malloc( bv.bv_len + 1 );
-
-				snprintf( bv.bv_val, bv.bv_len + 1, "\"%s\" \"%s\"",
-						pr->uri.bv_val, pr->policy_dn.bv_val );
-				ber_bvarray_add( &a.a_vals, &bv );
-				a.a_numvals++;
-			}
-
-			ordered_value_renumber( &a );
-			c->rvalue_vals = a.a_vals;
-			return LDAP_SUCCESS;
-		}
-		return 1;
-	} else if ( c->op == LDAP_MOD_DELETE ) {
-		if ( pi->policy_rules ) {
-			for ( prp = &pi->policy_rules, i=0; *prp; i++ ) {
-				pr = *prp;
-
-				if ( c->valx == -1 || i == c->valx ) {
-					*prp = pr->next;
-					pr->next = NULL;
-
-					ch_free( pr->uri.bv_val );
-					ch_free( pr->base.bv_val );
-					ch_free( pr->policy_dn.bv_val );
-					filter_free( pr->filter );
-					ch_free( pr );
-
-					if ( i == c->valx )
-						break;
-				} else {
-					prp = &pr->next;
-				}
-			}
-		}
-		return LDAP_SUCCESS;
-	}
-
-	if ( ldap_url_parse_ext( c->argv[1], &lud, 0 ) != LDAP_SUCCESS ) {
-		snprintf( c->cr_msg, sizeof( c->cr_msg ),
-				"ppolicy_rules: bad policy URL");
-		return rc;
-	}
-
-	pr = ch_calloc( 1, sizeof(policy_rule) );
-	ber_str2bv( c->argv[1], 0, 1, &pr->uri );
-	pr->scope = lud->lud_scope;
-
-	ber_str2bv( lud->lud_dn, 0, 0, &bv );
-	if ( dnNormalize( 0, NULL, NULL, &bv, &pr->base, NULL ) ) {
-		snprintf( c->cr_msg, sizeof( c->cr_msg ),
-				"ppolicy_rules: bad URL base" );
-		rc = ARG_BAD_CONF;
-		goto done;
-	}
-
-	if ( lud->lud_filter ) {
-		pr->filter = str2filter( lud->lud_filter );
-		if ( !pr->filter ) {
-			snprintf( c->cr_msg, sizeof( c->cr_msg ),
-					"ppolicy_rules: bad filter" );
-			rc = ARG_BAD_CONF;
-			goto done;
-		}
-	}
-
-	ber_str2bv( c->argv[2], 0, 0, &bv );
-	if ( dnNormalize( 0, NULL, NULL, &bv, &pr->policy_dn, NULL ) ) {
-		snprintf( c->cr_msg, sizeof( c->cr_msg ),
-				"ppolicy_rules: bad policy DN" );
-		rc = ARG_BAD_CONF;
-		goto done;
-	}
-
-	rc = LDAP_SUCCESS;
-	for ( i = 0, prp = &pi->policy_rules;
-		*prp && ( c->valx < 0 || i < c->valx );
-		prp = &(*prp)->next, i++ )
-		/* advance to the desired position */ ;
-	pr->next = *prp;
-	*prp = pr;
-
-done:
-	ldap_free_urldesc( lud );
-	if ( rc != LDAP_SUCCESS ) {
-		ch_free( pr->uri.bv_val );
-		ch_free( pr->policy_dn.bv_val );
-		filter_free( pr->filter );
-		ch_free( pr );
-	}
 	return rc;
 }
 
@@ -1072,56 +938,6 @@ fail:
 	(void)ber_free_buf(ber);
 }
 
-static int
-ppolicy_operational( Operation *op, SlapReply *rs )
-{
-	slap_overinst *on = (slap_overinst *)op->o_bd->bd_info;
-	pp_info *pi = on->on_bi.bi_private;
-	Entry *e = rs->sr_entry;
-
-	/* This allows clients to find out if there's a value stored directly in
-	 * the DB (and syncrepl clients not to commit our generated copy), callers
-	 * need to make sure they don't copy the control from their op if they need
-	 * it resolved anyway */
-	if ( op->o_managedsait != SLAP_CONTROL_NONE )
-		return SLAP_CB_CONTINUE;
-
-	/* No entry or attribute already set? Nothing to do */
-	if ( !e || attr_find( e->e_attrs, ad_pwdPolicySubentry ) )
-		return SLAP_CB_CONTINUE;
-
-	if ( SLAP_OPATTRS( rs->sr_attr_flags ) ||
-		ad_inlist( ad_pwdPolicySubentry, rs->sr_attrs )) {
-		Attribute *a, **ap = NULL;
-		policy_rule *pr;
-		BerVarray vals;
-
-		for ( pr = pi->policy_rules; pr; pr = pr->next ) {
-			if ( !dnIsSuffixScope( &e->e_nname, &pr->base, pr->scope ) ) continue;
-			if ( pr->filter && test_filter( op, e, pr->filter ) != LDAP_COMPARE_TRUE ) continue;
-
-			/* We found a match */
-			break;
-		}
-
-		if ( pr ) {
-			vals = &pr->policy_dn;
-		} else if ( !BER_BVISNULL( &pi->def_policy ) ) {
-			vals = &pi->def_policy;
-		} else {
-			return SLAP_CB_CONTINUE;
-		}
-
-		a = attr_alloc( ad_pwdPolicySubentry );
-		attr_valadd( a, vals, vals, 1 );
-
-		for ( ap = &rs->sr_operational_attrs; *ap; ap=&(*ap)->a_next );
-		*ap = a;
-	}
-
-	return SLAP_CB_CONTINUE;
-}
-
 static void
 ppolicy_get_default( PassPolicy *pp )
 {
@@ -1137,25 +953,28 @@ ppolicy_get_default( PassPolicy *pp )
 static int
 ppolicy_get( Operation *op, Entry *e, PassPolicy *pp )
 {
+	slap_overinst *on = (slap_overinst *)op->o_bd->bd_info;
+	pp_info *pi = on->on_bi.bi_private;
 	BackendDB *bd, *bd_orig = op->o_bd;
 	AttributeDescription *ad = NULL;
 	Attribute *a;
-	BerVarray vals = NULL;
+	BerVarray vals;
 	int rc = LDAP_SUCCESS;
 	Entry *pe = NULL;
+#if 0
+	const char *text;
+#endif
 
 	ppolicy_get_default( pp );
 
 	ad = ad_pwdPolicySubentry;
 	if ( (a = attr_find( e->e_attrs, ad )) == NULL ) {
-		/* This could be an Add, make sure we pass the entry in */
-		rc = backend_attribute( op, e, &op->o_req_ndn,
-				ad_pwdPolicySubentry, &vals, ACL_NONE );
-		if ( rc || vals == NULL ) {
-			Debug( LDAP_DEBUG_ANY, "ppolicy_get: "
-				"got rc=%d getting value for policySubEntry\n", rc );
+		/*
+		 * entry has no password policy assigned - use default
+		 */
+		vals = &pi->def_policy;
+		if ( !vals->bv_val )
 			goto defaultpol;
-		}
 	} else {
 		vals = a->a_nvals;
 		if (vals[0].bv_val == NULL) {
@@ -1351,7 +1170,7 @@ defaultpol:
 		op->o_bd = bd_orig;
 	}
 
-	if ( rc && vals && !BER_BVISNULL( vals ) ) {
+	if ( rc && !BER_BVISNULL( vals ) ) {
 		Debug( LDAP_DEBUG_ANY, "ppolicy_get: "
 			"policy subentry %s missing or invalid at '%s', "
 			"no policy will be applied!\n",
@@ -2455,36 +2274,6 @@ ppolicy_compare(
 			return rs->sr_err;
 		}
 	}
-
-	if ( op->orc_ava->aa_desc == ad_pwdPolicySubentry ) {
-		BerVarray vals = NULL;
-		int rc;
-
-		rc = backend_attribute( op, NULL, &op->o_req_ndn,
-				ad_pwdPolicySubentry, &vals, ACL_COMPARE );
-
-		if ( rc != LDAP_SUCCESS ) {
-			/* Defer to the DB */
-			return SLAP_CB_CONTINUE;
-		}
-
-		if ( value_find_ex( ad_pwdPolicySubentry,
-					SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
-					SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
-					vals, &op->orc_ava->aa_value, op->o_tmpmemctx ) == 0 )
-		{
-			rc = LDAP_COMPARE_TRUE;
-		} else {
-			rc = LDAP_COMPARE_FALSE;
-		}
-
-		if ( vals ) {
-			ber_bvarray_free_x( vals, op->o_tmpmemctx );
-		}
-		send_ldap_error( op, rs, rc, NULL );
-		return rs->sr_err;
-	}
-
 	return SLAP_CB_CONTINUE;
 }
 
@@ -3571,21 +3360,10 @@ ppolicy_db_destroy(
 {
 	slap_overinst *on = (slap_overinst *) be->bd_info;
 	pp_info *pi = on->on_bi.bi_private;
-	policy_rule *pr = pi->policy_rules, *next;
 
 	on->on_bi.bi_private = NULL;
 	ldap_pvt_thread_mutex_destroy( &pi->pwdFailureTime_mutex );
 	free( pi->def_policy.bv_val );
-	while ( pr ) {
-		next = pr->next;
-
-		ch_free( pr->uri.bv_val );
-		ch_free( pr->base.bv_val );
-		ch_free( pr->policy_dn.bv_val );
-		filter_free( pr->filter );
-		ch_free( pr );
-		pr = next;
-	}
 	free( pi );
 
 	ov_count--;
@@ -3693,7 +3471,6 @@ int ppolicy_initialize()
 	ppolicy.on_bi.bi_op_delete = ppolicy_restrict;
 	ppolicy.on_bi.bi_op_modify = ppolicy_modify;
 	ppolicy.on_bi.bi_op_search = ppolicy_search;
-	ppolicy.on_bi.bi_operational = ppolicy_operational;
 	ppolicy.on_bi.bi_connection_destroy = ppolicy_connection_destroy;
 
 	ppolicy.on_bi.bi_cf_ocs = ppolicyocs;

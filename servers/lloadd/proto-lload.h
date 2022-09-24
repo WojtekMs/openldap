@@ -81,7 +81,6 @@ LDAP_SLAPD_F (int) lload_bindconf_parse( const char *word, slap_bindconf *bc );
 LDAP_SLAPD_F (int) lload_bindconf_unparse( slap_bindconf *bc, struct berval *bv );
 LDAP_SLAPD_F (int) lload_bindconf_tls_set( slap_bindconf *bc, LDAP *ld );
 LDAP_SLAPD_F (void) lload_bindconf_free( slap_bindconf *bc );
-LDAP_SLAPD_F (void) lload_restriction_free( struct restriction_entry *entry );
 #ifdef BALANCER_MODULE
 LDAP_SLAPD_F (int) lload_back_init_cf( BackendInfo *bi );
 #endif
@@ -144,13 +143,11 @@ LDAP_SLAPD_V (Avlnode *) lload_exop_handlers;
 LDAP_SLAPD_F (int) exop_handler_cmp( const void *l, const void *r );
 LDAP_SLAPD_F (int) request_extended( LloadConnection *c, LloadOperation *op );
 LDAP_SLAPD_F (int) lload_exop_init( void );
-LDAP_SLAPD_F (void) lload_exop_destroy( void );
 
 /*
  * init.c
  */
 LDAP_SLAPD_F (int) lload_global_init( void );
-LDAP_SLAPD_F (int) lload_global_destroy( void );
 LDAP_SLAPD_F (int) lload_tls_init( void );
 LDAP_SLAPD_F (int) lload_init( int mode, const char *name );
 LDAP_SLAPD_F (int) lload_destroy( void );

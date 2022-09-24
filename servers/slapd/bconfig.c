@@ -1396,7 +1396,7 @@ config_generic(ConfigArgs *c) {
 			c->value_int = (SLAP_SYNC_SUBENTRY(c->be) != 0);
 			break;
 		case CFG_MULTIPROVIDER:
-			if ( sid_list )
+			if ( SLAP_SHADOW(c->be))
 				c->value_int = (SLAP_MULTIPROVIDER(c->be) != 0);
 			else
 				rc = 1;
@@ -1566,6 +1566,8 @@ config_generic(ConfigArgs *c) {
 
 		case CFG_MULTIPROVIDER:
 			SLAP_DBFLAGS(c->be) &= ~SLAP_DBFLAG_MULTI_SHADOW;
+			if(SLAP_SHADOW(c->be))
+				SLAP_DBFLAGS(c->be) |= SLAP_DBFLAG_SINGLE_SHADOW;
 			break;
 
 #if defined(HAVE_CYRUS_SASL) && defined(SLAP_AUXPROP_DONTUSECOPY)
@@ -2106,10 +2108,7 @@ config_generic(ConfigArgs *c) {
 				}
 				/* else prev is NULL, append to end of global list */
 			}
-			if ( parse_oc( c, &oc, prev ) ) {
-				c->reply.err = LDAP_INVALID_SYNTAX;
-				return(1);
-			}
+			if(parse_oc(c, &oc, prev)) return(1);
 			if (!cfn->c_oc_head || !c->valx) cfn->c_oc_head = oc;
 			if (cfn->c_oc_tail == prev) cfn->c_oc_tail = oc;
 			}
@@ -2142,10 +2141,7 @@ config_generic(ConfigArgs *c) {
 				}
 				/* else prev is NULL, append to end of global list */
 			}
-			if ( parse_at( c, &at, prev ) ) {
-				c->reply.err = LDAP_INVALID_SYNTAX;
-				return(1);
-			}
+			if(parse_at(c, &at, prev)) return(1);
 			if (!cfn->c_at_head || !c->valx) cfn->c_at_head = at;
 			if (cfn->c_at_tail == prev) cfn->c_at_tail = at;
 			}
@@ -2178,10 +2174,7 @@ config_generic(ConfigArgs *c) {
 				}
 				/* else prev is NULL, append to end of global list */
 			}
-			if ( parse_syn( c, &syn, prev ) ) {
-				c->reply.err = LDAP_INVALID_SYNTAX;
-				return(1);
-			}
+			if ( parse_syn( c, &syn, prev ) ) return(1);
 			if ( !cfn->c_syn_head || !c->valx ) cfn->c_syn_head = syn;
 			if ( cfn->c_syn_tail == prev ) cfn->c_syn_tail = syn;
 			}
@@ -2192,10 +2185,7 @@ config_generic(ConfigArgs *c) {
 
 			if ( c->op == LDAP_MOD_ADD && c->ca_private && cfn != c->ca_private )
 				cfn = c->ca_private;
-			if( parse_cr( c, &cr ) ) {
-				c->reply.err = LDAP_INVALID_SYNTAX;
-				return(1);
-			}
+			if(parse_cr(c, &cr)) return(1);
 			if (!cfn->c_cr_head) cfn->c_cr_head = cr;
 			cfn->c_cr_tail = cr;
 			}
@@ -2423,18 +2413,18 @@ sortval_reject:
 			break;
 
 		case CFG_MULTIPROVIDER:
-			/* Matching on sid_list rather than serverID to keep tools in check */
-			if ( c->value_int && !sid_list ) {
-				snprintf( c->cr_msg, sizeof( c->cr_msg ), "<%s> "
-					"serverID is not configured, do that first",
+			if(c->value_int && !SLAP_SHADOW(c->be)) {
+				snprintf( c->cr_msg, sizeof( c->cr_msg ), "<%s> database is not a shadow",
 					c->argv[0] );
 				Debug(LDAP_DEBUG_ANY, "%s: %s\n",
 					c->log, c->cr_msg );
 				return(1);
 			}
 			if(c->value_int) {
+				SLAP_DBFLAGS(c->be) &= ~SLAP_DBFLAG_SINGLE_SHADOW;
 				SLAP_DBFLAGS(c->be) |= SLAP_DBFLAG_MULTI_SHADOW;
 			} else {
+				SLAP_DBFLAGS(c->be) |= SLAP_DBFLAG_SINGLE_SHADOW;
 				SLAP_DBFLAGS(c->be) &= ~SLAP_DBFLAG_MULTI_SHADOW;
 			}
 			break;
@@ -2905,8 +2895,17 @@ config_overlay(ConfigArgs *c) {
 	} else if ( c->op == LDAP_MOD_DELETE ) {
 		assert(0);
 	}
-
-	return overlay_config( c->be, c->argv[1], c->valx, &c->bi, &c->reply );
+	if(c->argv[1][0] == '-' && overlay_config(c->be, &c->argv[1][1],
+		c->valx, &c->bi, &c->reply)) {
+		/* log error */
+		Debug( LDAP_DEBUG_ANY,
+			"%s: (optional) %s overlay \"%s\" configuration failed.\n",
+			c->log, c->be == frontendDB ? "global " : "", &c->argv[1][1]);
+		return 1;
+	} else if(overlay_config(c->be, c->argv[1], c->valx, &c->bi, &c->reply)) {
+		return(1);
+	}
+	return(0);
 }
 
 static int
@@ -2978,7 +2977,7 @@ config_subordinate(ConfigArgs *c)
 
 #ifdef LDAP_TCP_BUFFER
 static BerVarray tcp_buffer;
-static int tcp_buffer_num;
+int tcp_buffer_num;
 
 #define SLAP_TCP_RMEM (0x1U)
 #define SLAP_TCP_WMEM (0x2U)
@@ -3901,7 +3900,7 @@ config_updatedn(ConfigArgs *c) {
 	} else if ( c->op == LDAP_MOD_DELETE ) {
 		ch_free( c->be->be_update_ndn.bv_val );
 		BER_BVZERO( &c->be->be_update_ndn );
-		SLAP_DBFLAGS(c->be) &= ~SLAP_DBFLAG_SLURP_SHADOW;
+		SLAP_DBFLAGS(c->be) ^= (SLAP_DBFLAG_SHADOW | SLAP_DBFLAG_SLURP_SHADOW);
 		return 0;
 	}
 	if(SLAP_SHADOW(c->be)) {
@@ -3939,14 +3938,18 @@ config_shadow( ConfigArgs *c, slap_mask_t flag )
 		return 1;
 	}
 
-	/* if already shadow, only check consistency */
-	if ( ((SLAP_DBFLAGS(c->be) & SLAP_DBFLAG_SINGLE_SHADOW_MASK) | flag) != flag ) {
-		Debug( LDAP_DEBUG_ANY, "%s: inconsistent shadow flag 0x%lx != 0x%lx.\n",
-			c->log, flag, ( SLAP_DBFLAGS(c->be) & SLAP_DBFLAG_SINGLE_SHADOW_MASK ) );
-		return 1;
+	if ( SLAP_SHADOW(c->be) ) {
+		/* if already shadow, only check consistency */
+		if ( ( SLAP_DBFLAGS(c->be) & flag ) != flag ) {
+			Debug( LDAP_DEBUG_ANY, "%s: inconsistent shadow flag 0x%lx.\n",
+				c->log, flag );
+			return 1;
+		}
 
 	} else {
-		SLAP_DBFLAGS(c->be) |= flag;
+		SLAP_DBFLAGS(c->be) |= (SLAP_DBFLAG_SHADOW | flag);
+		if ( !SLAP_MULTIPROVIDER( c->be ))
+			SLAP_DBFLAGS(c->be) |= SLAP_DBFLAG_SINGLE_SHADOW;
 	}
 
 	return 0;
@@ -3974,7 +3977,7 @@ config_updateref(ConfigArgs *c) {
 		}
 		return 0;
 	}
-	if( !SLAP_SINGLE_SHADOW(c->be) && !c->be->be_syncinfo ) {
+	if(!SLAP_SHADOW(c->be) && !c->be->be_syncinfo) {
 		snprintf( c->cr_msg, sizeof( c->cr_msg ), "<%s> must appear after syncrepl or updatedn",
 			c->argv[0] );
 		Debug(LDAP_DEBUG_ANY, "%s: %s\n",
@@ -5520,7 +5523,7 @@ config_add_internal( CfBackInfo *cfb, Entry *e, ConfigArgs *ca, SlapReply *rs,
 			}
 			rc = config_parse_add( ct, ca, i );
 			if ( rc ) {
-				rc = ca->reply.err ? ca->reply.err : LDAP_OTHER;
+				rc = LDAP_OTHER;
 				goto done;
 			}
 		}
@@ -5733,7 +5736,7 @@ config_back_add( Operation *op, SlapReply *rs )
 	{
 		char textbuf[SLAP_TEXT_BUFLEN];
 		size_t textlen = sizeof textbuf;
-		rs->sr_err = entry_schema_check(op, op->ora_e, 0, 1, NULL,
+		rs->sr_err = entry_schema_check(op, op->ora_e, NULL, 0, 1, NULL,
 			&rs->sr_text, textbuf, sizeof( textbuf ) );
 		if ( rs->sr_err != LDAP_SUCCESS )
 			goto out;
@@ -5867,7 +5870,7 @@ config_modify_add( ConfigTable *ct, ConfigArgs *ca, AttributeDescription *ad,
 	}
 	rc = config_parse_add( ct, ca, i );
 	if ( rc ) {
-		rc = ca->reply.err ? ca->reply.err : LDAP_OTHER;
+		rc = LDAP_OTHER;
 	}
 	return rc;
 }
@@ -6075,7 +6078,7 @@ config_modify_internal( CfEntryInfo *ce, Operation *op, SlapReply *rs,
 	
 	if ( rc == LDAP_SUCCESS) {
 		/* check that the entry still obeys the schema */
-		rc = entry_schema_check(op, e, 0, 0, NULL,
+		rc = entry_schema_check(op, e, NULL, 0, 0, NULL,
 			&rs->sr_text, ca->cr_msg, sizeof(ca->cr_msg) );
 	}
 	if ( rc ) goto out_noop;

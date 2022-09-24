@@ -437,13 +437,6 @@ OL_ARG_ENABLE(balancer, [AS_HELP_STRING([--enable-balancer], [enable load balanc
 	no, [no yes mod])
 
 dnl ----------------------------------------------------------------
-dnl TESTSUITE OPTIONS
-AC_ARG_ENABLE(testoptions,[
-Test suite Options:])
-OL_ARG_ENABLE(harness, [AS_HELP_STRING([--enable-harness], [enable mod_harness])],
-	no, [no yes])
-
-dnl ----------------------------------------------------------------
 AC_ARG_ENABLE(xxliboptions,[
 Library Generation & Linking Options])
 AC_ENABLE_STATIC
@@ -478,11 +471,6 @@ if test $ol_enable_slapd = no ; then
 		AC_MSG_WARN([slapd disabled, ignoring --enable-balancer=mod argument])
 		ol_enable_balancer=no
 	fi
-
-	if test $ol_enable_harness != no ; then
-		AC_MSG_WARN([slapd disabled, ignoring --enable-harness=$ol_enable_harness argument])
-		ol_enable_harness=no
-	fi
 else
 	dnl If slapd enabled and loadable module support disabled
 	dnl then require at least one built-in backend
@@ -496,7 +484,7 @@ else
 			fi
 		done
 
-		for i in harness $Pwmods; do
+		for i in $Pwmods; do
 			eval "ol_tmp=\$ol_enable_$i"
 			if test -n "$ol_tmp" && test "$ol_tmp" = yes ; then
 				AC_MSG_ERROR([--enable-$i=yes requires --enable-modules])
@@ -569,6 +557,7 @@ CLIENT_LIBS=
 
 SLAPD_LIBS=
 BALANCER_LIBS=
+BALANCER_INCLUDE=
 
 BUILD_SLAPD=no
 BUILD_BALANCER=no
@@ -620,8 +609,6 @@ BUILD_UNIQUE=no
 BUILD_VALSORT=no
 
 BUILD_PW_ARGON2=no
-
-BUILD_HARNESS=no
 
 SLAPD_STATIC_OVERLAYS=
 SLAPD_DYNAMIC_OVERLAYS=
@@ -2048,7 +2035,7 @@ dnl
 WITH_SYSTEMD=no
 systemdsystemunitdir=
 ol_link_systemd=no
-if test $ol_enable_slapd = no && test $ol_enable_balancer != yes ; then
+if test $ol_enable_slapd == no && test $ol_enable_balancer != yes ; then
 	if test $ol_with_systemd != no ; then
 		AC_MSG_WARN([servers disabled, ignoring --with-systemd=$ol_with_systemd argument])
 		ol_with_systemd=no
@@ -3061,11 +3048,11 @@ if test "$ol_enable_balancer" != no \
 		-a "$ol_with_threads" != no \
 		-a "$have_libevent" = yes ; then
 	if test "$ol_enable_balancer" = mod; then
+		BALANCER_INCLUDE=Makefile.module
 		BUILD_BALANCER=mod
-		BALANCER_MAKE="servers/lloadd/Makefile_module.in:build/mod.mk"
 	else
+		BALANCER_INCLUDE=Makefile.server
 		BUILD_BALANCER=yes
-		BALANCER_MAKE="servers/lloadd/Makefile_server.in:build/srv.mk"
 	fi
 fi
 
@@ -3076,7 +3063,6 @@ if test "$ol_enable_slapi" != no ; then
 fi
 
 OL_VERSIONED_SYMBOLS=""
-DO_VERSIONED_SYMBOLS="# "
 if test $ol_enable_versioning != no; then
 	LDVS=`$LD --help < /dev/null 2>/dev/null | grep gnu-version-script`
 	if test -z "$LDVS"; then
@@ -3091,17 +3077,6 @@ if test $ol_enable_versioning != no; then
 	else
 		OL_VERSIONED_SYMBOLS="-z gnu-version-script="
 	fi
-	if test -n "$OL_VERSIONED_SYMBOLS"; then
-		DO_VERSIONED_SYMBOLS=""
-	fi
-fi
-
-dnl ----------------------------------------------------------------
-dnl Test suite
-
-dnl We use 'yes' but mean 'mod' as far as our Makefile infra is concerned
-if test $ol_enable_harness != no; then
-    BUILD_HARNESS=mod
 fi
 
 dnl ----------------------------------------------------------------
@@ -3128,7 +3103,6 @@ AC_SUBST(WITH_SYSTEMD)
 AC_SUBST(BUILD_THREAD)
 AC_SUBST(BUILD_LIBS_DYNAMIC)
 AC_SUBST(OL_VERSIONED_SYMBOLS)
-AC_SUBST(DO_VERSIONED_SYMBOLS)
 
 AC_SUBST(BUILD_SLAPD)
 dnl slapi
@@ -3179,8 +3153,6 @@ dnl overlays
   AC_SUBST(BUILD_BALANCER)
 dnl pwmods
   AC_SUBST(BUILD_PW_ARGON2)
-dnl test suite
-  AC_SUBST(BUILD_HARNESS)
 
 AC_SUBST(LDAP_LIBS)
 AC_SUBST(CLIENT_LIBS)
@@ -3226,6 +3198,8 @@ AC_SUBST(SLAPD_SQL_INCLUDES)
 
 AC_SUBST(WT_CFLAGS)
 AC_SUBST(WT_LIBS)
+
+AC_SUBST(BALANCER_INCLUDE)
 
 dnl ----------------------------------------------------------------
 dnl final help output
@@ -3273,11 +3247,11 @@ AC_CONFIG_FILES([Makefile:build/top.mk:Makefile.in:build/dir.mk]
 [servers/slapd/slapi/Makefile:build/top.mk:servers/slapd/slapi/Makefile.in:build/lib.mk:build/lib-shared.mk]
 [servers/slapd/overlays/Makefile:build/top.mk:servers/slapd/overlays/Makefile.in:build/lib.mk]
 [servers/slapd/pwmods/Makefile:build/top.mk:servers/slapd/pwmods/Makefile.in:build/lib.mk]
-[servers/lloadd/Makefile:build/top.mk:servers/lloadd/Makefile.in:$BALANCER_MAKE]
+[servers/lloadd/Makefile:build/top.mk:servers/lloadd/Makefile.in]
+[servers/lloadd/Makefile.server:servers/lloadd/Makefile_server.in:build/srv.mk]
+[servers/lloadd/Makefile.module:servers/lloadd/Makefile_module.in:build/mod.mk]
 [tests/Makefile:build/top.mk:tests/Makefile.in:build/dir.mk]
 [tests/run]
-[tests/modules/Makefile:build/top.mk:tests/modules/Makefile.in:build/dir.mk]
-[tests/modules/mod-harness/Makefile:build/top.mk:tests/modules/mod-harness/Makefile.in:build/mod.mk]
 [tests/progs/Makefile:build/top.mk:tests/progs/Makefile.in:build/rules.mk])
 
 AC_CONFIG_COMMANDS([default],[[

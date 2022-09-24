@@ -870,7 +870,6 @@ destroy:
         (void)loglevel_print( stdout );
     }
     /* remember an error during destroy */
-    rc |= lload_global_destroy();
     rc |= lload_destroy();
 
 stop:

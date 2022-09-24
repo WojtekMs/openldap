@@ -316,6 +316,9 @@ int main( int argc, char **argv )
 
 		newUrls = (char *) lutil_getRegParam(regService, "Urls");
 		if (newUrls) {
+		    if (urls)
+			ch_free(urls);
+
 		    urls = ch_strdup(newUrls);
 		    Debug(LDAP_DEBUG_ANY, "new urls from registry: %s\n",
 				urls );
@@ -364,6 +367,7 @@ int main( int argc, char **argv )
 #endif
 
 		case 'h':	/* listen URLs */
+			if ( urls != NULL ) free( urls );
 			urls = optarg;
 			break;
 
