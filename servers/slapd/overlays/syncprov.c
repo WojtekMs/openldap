@@ -1075,6 +1075,7 @@ syncprov_qtask( void *ctx, void *arg )
 	op->o_tmpmemctx = slap_sl_mem_create(SLAP_SLAB_SIZE, SLAP_SLAB_STACK, ctx, 1);
 	op->o_tmpmfuncs = &slap_sl_mfuncs;
 	op->o_threadctx = ctx;
+	operation_counter_init( op, ctx );
 
 	/* syncprov_qplay expects a fake db */
 	be = *so->s_op->o_bd;
@@ -3162,6 +3163,8 @@ syncprov_op_search( Operation *op, SlapReply *rs )
 			 */
 			ldap_pvt_thread_mutex_unlock( &si->si_ops_mutex );
 			if ( slapd_shutdown ) {
+aband:
+				ch_free( sop->s_base.bv_val );
 				ch_free( sop );
 				return SLAPD_ABANDON;
 			}
@@ -3171,8 +3174,7 @@ syncprov_op_search( Operation *op, SlapReply *rs )
 		}
 		if ( op->o_abandon ) {
 			ldap_pvt_thread_mutex_unlock( &si->si_ops_mutex );
-			ch_free( sop );
-			return SLAPD_ABANDON;
+			goto aband;
 		}
 		ldap_pvt_thread_mutex_init( &sop->s_mutex );
 		sop->s_next = si->si_ops;
@@ -3241,14 +3243,8 @@ syncprov_op_search( Operation *op, SlapReply *rs )
 		if (srs->sr_state.numcsns != numcsns) {
 			/* consumer doesn't have the right number of CSNs */
 			Debug( LDAP_DEBUG_SYNC, "%s syncprov_op_search: "
-				"consumer cookie is missing a csn we track%s\n",
-				op->o_log_prefix, si->si_nopres ? ", rejecting" : "" );
-
-			if ( si->si_nopres ) {
-				rs->sr_err = LDAP_SYNC_REFRESH_REQUIRED;
-				rs->sr_text = "not enough information to resync, please use other means";
-				goto bailout;
-			}
+				"consumer cookie is missing a csn we track\n",
+				op->o_log_prefix );
 
 			changed = SS_CHANGED;
 			if ( srs->sr_state.ctxcsn ) {
@@ -3301,6 +3297,7 @@ bailout:
 						sp = &(*sp)->s_next;
 					*sp = sop->s_next;
 					ldap_pvt_thread_mutex_unlock( &si->si_ops_mutex );
+					ch_free( sop->s_base.bv_val );
 					ch_free( sop );
 				}
 				rs->sr_ctrls = NULL;
@@ -3347,7 +3344,55 @@ no_change:	if ( !(op->o_sync_mode & SLAP_SYNC_PERSIST) ) {
 					numcsns, sids, &mincsn, minsid ) ) {
 				do_present = SS_PRESENT;
 			}
+		} else if ( ad_minCSN != NULL && si->si_nopres && si->si_usehint ) {
+			/* We are instructed to trust minCSN if it exists. */
+			Entry *e;
+			Attribute *a = NULL;
+			int rc;
+
+			/*
+			 * ITS#9580 FIXME: when we've figured out and split the
+			 * sessionlog/deltalog tracking, use the appropriate attribute
+			 */
+			rc = overlay_entry_get_ov( op, &op->o_bd->be_nsuffix[0], NULL,
+					ad_minCSN, 0, &e, on );
+			if ( rc == LDAP_SUCCESS && e != NULL ) {
+				a = attr_find( e->e_attrs, ad_minCSN );
+			}
+
+			if ( a != NULL ) {
+				int *minsids;
+
+				minsids = slap_parse_csn_sids( a->a_vals, a->a_numvals, op->o_tmpmemctx );
+				slap_sort_csn_sids( a->a_vals, minsids, a->a_numvals, op->o_tmpmemctx );
+
+				for ( i=0, j=0; i < a->a_numvals; i++ ) {
+					while ( j < numcsns && minsids[i] > sids[j] ) j++;
+					if ( j < numcsns && minsids[i] == sids[j] &&
+							ber_bvcmp( &a->a_vals[i], &srs->sr_state.ctxcsn[j] ) <= 0 ) {
+						/* minCSN for this serverID is contained, keep going */
+						continue;
+					}
+					/*
+					 * Log DB's minCSN claims we can only replay from a certain
+					 * CSN for this serverID, but consumer's cookie hasn't met that
+					 * threshold: they need to refresh
+					 */
+					Debug( LDAP_DEBUG_SYNC, "%s syncprov_op_search: "
+						"consumer not within recorded mincsn for DB's mincsn=%s\n",
+						op->o_log_prefix, a->a_vals[i].bv_val );
+					rs->sr_err = LDAP_SYNC_REFRESH_REQUIRED;
+					rs->sr_text = "sync cookie is stale";
+					slap_sl_free( minsids, op->o_tmpmemctx );
+					overlay_entry_release_ov( op, e, 0, on );
+					goto bailout;
+				}
+				slap_sl_free( minsids, op->o_tmpmemctx );
+			}
+			if ( e != NULL )
+				overlay_entry_release_ov( op, e, 0, on );
 		}
+
 		/*
 		 * If sessionlog wasn't useful, see if we can find at least one entry
 		 * that hasn't changed based on the cookie.
@@ -3792,6 +3837,10 @@ sp_cf_gen(ConfigArgs *c)
 		break;
 	case SP_USEHINT:
 		si->si_usehint = c->value_int;
+		if ( si->si_usehint ) {
+			/* Consider we might be a delta provider, but it's ok if not */
+			(void)syncprov_setup_accesslog();
+		}
 		break;
 	case SP_LOGDB:
 		if ( si->si_logs ) {
@@ -4136,6 +4185,8 @@ syncprov_db_destroy(
 			ber_bvarray_free( si->si_ctxcsn );
 		if ( si->si_sids )
 			ch_free( si->si_sids );
+		if ( si->si_logbase.bv_val )
+			ch_free( si->si_logbase.bv_val );
 		ldap_pvt_thread_mutex_destroy( &si->si_resp_mutex );
 		ldap_pvt_thread_mutex_destroy( &si->si_mods_mutex );
 		ldap_pvt_thread_mutex_destroy( &si->si_ops_mutex );

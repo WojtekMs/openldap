@@ -227,11 +227,10 @@ static slap_daemon_st *slap_daemon;
     slap_daemon[t].sd_kq = kqueue(); \
 } while (0)
 
-/* a kqueue fd obtained before a fork can't be used in child process.
- * close it and reacquire it.
+/* a kqueue fd obtained before a fork isn't inherited by child process.
+ * reacquire it.
  */
 # define SLAP_SOCK_INIT2() do { \
-	close(slap_daemon[0].sd_kq); \
 	slap_daemon[0].sd_kq = kqueue(); \
 } while (0)
 
@@ -2413,6 +2412,18 @@ slap_listener_activate(
 }
 
 static void *
+slapd_rtask_trampoline(
+	void	*ctx,
+	void	*arg )
+{
+	struct re_s *rtask = arg;
+
+	/* invalidate pool_cookie */
+	rtask->pool_cookie = NULL;
+	return rtask->routine( ctx, arg );
+}
+
+static void *
 slapd_daemon_task(
 	void *ptr )
 {
@@ -2775,7 +2786,7 @@ loop:
 					ldap_pvt_runqueue_resched( &slapd_rq, rtask, 0 );
 					ldap_pvt_thread_mutex_unlock( &slapd_rq.rq_mutex );
 					ldap_pvt_thread_pool_submit2( &connection_pool,
-						rtask->routine, (void *) rtask, &rtask->pool_cookie );
+						slapd_rtask_trampoline, (void *) rtask, &rtask->pool_cookie );
 					ldap_pvt_thread_mutex_lock( &slapd_rq.rq_mutex );
 				}
 				rtask = ldap_pvt_runqueue_next_sched( &slapd_rq, &cat );

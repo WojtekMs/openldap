@@ -4540,7 +4540,6 @@ pcache_db_init(
 	SLAP_DBFLAGS(&cm->db) |= SLAP_DBFLAG_NO_SCHEMA_CHECK;
 	cm->db.be_private = NULL;
 	cm->db.bd_self = &cm->db;
-	cm->db.be_pending_csn_list = NULL;
 	cm->qm = qm;
 	cm->numattrsets = 0;
 	cm->num_entries_limit = 5;
@@ -5660,15 +5659,16 @@ pcache_monitor_db_close( BackendDB *be )
 	slap_overinst *on = (slap_overinst *)be->bd_info;
 	cache_manager *cm = on->on_bi.bi_private;
 
-	if ( cm->monitor_cb != NULL ) {
+	if ( !BER_BVISNULL( &cm->monitor_ndn )) {
 		BackendInfo		*mi = backend_info( "monitor" );
 		monitor_extra_t		*mbe;
 
 		if ( mi && mi->bi_extra ) {
+			struct berval dummy = BER_BVNULL;
 			mbe = mi->bi_extra;
 			mbe->unregister_entry_callback( &cm->monitor_ndn,
 				(monitor_callback_t *)cm->monitor_cb,
-				NULL, 0, NULL );
+				&dummy, 0, &dummy );
 		}
 	}
 
