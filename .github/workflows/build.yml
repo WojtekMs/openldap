@@ -40,12 +40,12 @@ jobs:
       - name: Run build-wrapper
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt update && apt install -y build-essential autoconf pkg-config groff-base libsasl2-dev libssl-dev libiodbc2-dev
+          sudo apt update && sudo apt install -y build-essential autoconf pkg-config groff-base libsasl2-dev libssl-dev libiodbc2-dev
           autoreconf
           export CPPFLAGS=-I/usr/include/iodbc
           ./configure --enable-slapd --enable-sql
           make depend
-          build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} make
+          build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} make -j$(nproc)
       - name: Run sonar-scanner
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
