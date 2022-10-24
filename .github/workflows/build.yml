@@ -40,9 +40,7 @@ jobs:
       - name: Run build-wrapper
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          sudo apt update && sudo apt install -y build-essential autoconf pkg-config groff-base libsasl2-dev libssl-dev libiodbc2 libiodbc2-dev
-          autoreconf
-          export CPPFLAGS=-I/usr/include/iodbc
+          sudo apt update && sudo apt install -y build-essential autoconf pkg-config groff-base libsasl2-dev libssl-dev libdb5.3-dev heimdal-multidev libssl-dev libltdl-dev groff-base unixodbc-dev libperl-dev
           ./configure --enable-slapd --enable-sql
           make depend
           build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} make -j$(nproc)
