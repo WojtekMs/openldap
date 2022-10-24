@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - master
-      - empty
+      - OPENLDAP_REL_ENG_2_4_56
   pull_request:
     types: [opened, synchronize, reopened]
 jobs:
